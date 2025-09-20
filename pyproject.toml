@@ -1,0 +1,33 @@
+[project]
+name = "metrics_forecaster"
+version = "0.1.0"
+description = "TimeSeries Forecaster prediction visualizer"
+authors = [
+    {name = "Дмитрий Цитман",email = "dimazzik@gmail.com"}
+]
+license = {text = "Apache 2.0"}
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.12,<4.0"
+pandas = ">=2.3.2,<3.0.0"
+streamlit = ">=1.49.1,<2.0.0"
+plotly = ">=6.3.0,<7.0.0"
+numpy = ">=2.3.3,<3.0.0"
+prophet = {version = ">=1.1.7,<2.0.0", extras = ["cmdstan"]}
+tensorflow = ">=2.20.0,<3.0.0"
+statsforecast = ">=2.0.2,<3.0.0"
+statsmodels = ">=0.14.5,<0.15.0"
+clickhouse-connect = "^0.9.1"
+openpyxl = "^3.1.5"
+requests-mock = "^1.12.1"
+
+[tool.poetry]
+packages = [{ include = "forecaster_main", from = "TimeSeriesApp" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
