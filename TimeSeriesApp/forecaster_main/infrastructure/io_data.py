@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import io
+import re
 from dataclasses import dataclass, field
-from typing import Optional, Any, Dict, Protocol
+from typing import Optional, Any, Dict, Protocol, io
 
 import clickhouse_connect
-import numpy as np
 import pandas as pd
 import requests
-from pandas import DataFrame
 
 
 # TODO добавить фильтрацию колонок
@@ -21,13 +19,11 @@ class ClickhouseParams:
     ch_password: str = ""
     ch_database: str = "default"
 
+
 @dataclass
 class LoadParams:
-    start: Optional[pd.Timestamp] = None
-    end: Optional[pd.Timestamp] = None
-
     # CSV / Excel
-    path: Optional[str] = None
+    path: Optional[str | io.BytesIO] = None
     sep: str = ","
     datetime_col: str = "timestamp"
 
@@ -41,6 +37,7 @@ class LoadParams:
     ch_table: str = None
 
     options: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class SaveParams:
@@ -65,29 +62,51 @@ class CsvSource(DataSource):
         if not params.path:
             raise ValueError("CSV/Excel path must be provided")
 
-        if params.path.lower().endswith((".xlsx", ".xls")):
-            df = pd.read_excel(params.path)
-        else:
+        if hasattr(params.path, "read"):  # file-like (Streamlit uploader)
             df = pd.read_csv(params.path, sep=params.sep)
+        elif isinstance(params.path, str):
+            if params.path.lower().endswith((".xlsx", ".xls")):
+                df = pd.read_excel(params.path)
+            else:
+                df = pd.read_csv(params.path, sep=params.sep)
+        else:
+            raise ValueError("Invalid path: must be file path or file-like object")
 
         # timestamp
         if params.datetime_col in df.columns:
             raw_ts = df[params.datetime_col]
+            ts = None
+
+            if pd.api.types.is_string_dtype(raw_ts.dtype):
+                raw_ts = raw_ts.str.strip()
+                pattern_numeric = re.compile("^([0-9]+)+$")
+                pattern_date = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+                pattern_datetime = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+                if pattern_numeric.match(raw_ts.iloc[0]):
+                    raw_ts = pd.to_numeric(raw_ts, errors="coerce")
+                elif params.options.get("timestamp_format"):
+                    ts = pd.to_datetime(raw_ts, format=params.options["timestamp_format"], errors="coerce", utc=True)
+                elif pattern_date.match(raw_ts.iloc[0]):
+                    ts = pd.to_datetime(raw_ts, format="%Y-%m-%d", errors="coerce", utc=True)
+                elif pattern_datetime.match(raw_ts.iloc[0]):
+                    ts = pd.to_datetime(raw_ts, format="%Y-%m-%d %H:%M:%S", errors="coerce", utc=True)
 
             if pd.api.types.is_numeric_dtype(raw_ts):
                 # определяем unit по порядку величины
                 max_val = raw_ts.max()
-                if max_val > 1e14:      # наносекунды
+                if max_val > 1e14:  # наносекунды
                     unit = "ns"
-                elif max_val > 1e11:    # миллисекунды
+                elif max_val > 1e11:  # миллисекунды
                     unit = "ms"
-                elif max_val > 1e9:     # секунды с долями
+                elif max_val > 1e9:  # секунды с долями
                     unit = "s"
                 else:
                     unit = "s"
                 ts = pd.to_datetime(raw_ts, unit=unit, errors="coerce", utc=True)
-            else:
+            elif pd.api.types.is_datetime64_any_dtype(raw_ts):
                 ts = pd.to_datetime(raw_ts, errors="coerce", utc=True)
+            elif ts is None:
+                raise ValueError(f"Unsupported data type: {raw_ts.dtype}")
 
             df = df.drop(columns=[params.datetime_col])
             df.index = ts
@@ -96,10 +115,10 @@ class CsvSource(DataSource):
             df.index = pd.RangeIndex(start=1, stop=len(df) + 1)
 
         # фильтры по датам
-        if params.start:
-            df = df[df.index >= params.start]
-        if params.end:
-            df = df[df.index <= params.end]
+        if params.options.get("start"):
+            df = df[df.index >= params.options.get("start")]
+        if params.options.get("end"):
+            df = df[df.index <= params.options.get("end")]
 
         # все числовые колонки → float
         for col in df.columns:
@@ -157,7 +176,7 @@ class PrometheusSource(DataSource):
         raise NotImplementedError("Prometheus does not support saving")
 
 
-#todo autoclose?
+# todo autoclose?
 class ClickHouseSource(DataSource):
     def __init__(self, params: ClickhouseParams):
         self.client = clickhouse_connect.get_client(
@@ -196,4 +215,4 @@ class ClickHouseSource(DataSource):
             for ts, val in df[col].dropna().items():
                 records.append((ts, col, "", float(val)))
         self.client.insert(params.ch_table, records,
-                      column_names=["timestamp", "timeseries_name", "timeseries_tags", "time_series_value"])
+                           column_names=["timestamp", "timeseries_name", "timeseries_tags", "time_series_value"])

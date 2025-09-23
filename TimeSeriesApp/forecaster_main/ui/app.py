@@ -1,31 +1,33 @@
 import json
 import os
+from pathlib import Path
 
-import streamlit as st
 import pandas as pd
 import plotly.express as px
+import streamlit as st
 
 from forecaster_main.infrastructure.io_data import (
     LoadParams, CsvSource, PrometheusSource,
     ClickHouseSource, ClickhouseParams
 )
+from forecaster_main.predictor.models import PredictParams
 from forecaster_main.predictor.predictor_service import SingleSeriesModelPredictor, ForecastParams
-from predictor.models import SARIMAXModel, SarimaxParams, ARIMAParams, ARIMAModel, ProphetModel, LSTMModel, LSTMParams, \
-    ProphetParams, PredictParams
 
-FORECASTER_FILE_PATH: str = os.getenv('FORECASTER_FILE_PATH', "./forecaster_params.json")
-
+FORECASTER_FILE_PATH: str = os.getenv('FORECASTER_FILE_PATH',
+                                      str(Path(__file__).parent / "forecaster_params.json"))
 st.set_page_config(page_title="Metric Forecaster", layout="wide")
 st.title("📈 Metric Forecaster Prototype")
 st.caption("Загрузи временные ряды из источника и визуализируй их.")
 
 # Инициализация session_state
+models = []
 if "df" not in st.session_state:
     st.session_state["df"] = None
 
 # Добавление сервиса анализа, для апдейта конфига нужно перезапускать сервис
-json_obj = json.loads(FORECASTER_FILE_PATH)
-forecaster_params : ForecastParams = ForecastParams(**json_obj)
+with open(FORECASTER_FILE_PATH, "r", encoding="utf-8") as f:
+    json_obj = json.load(f)
+forecaster_params: ForecastParams = ForecastParams(**json_obj)
 ssmp: SingleSeriesModelPredictor = SingleSeriesModelPredictor(forecaster_params)
 
 # --- Источники ---
@@ -38,17 +40,9 @@ source_type = st.selectbox(
 if source_type == "CSV/Excel":
     file = st.file_uploader("Загрузите CSV или Excel", type=["csv", "xlsx"])
     if file is not None:
-        if file.name.endswith("xlsx"):
-            df = pd.read_excel(file)
-        else:
-            df = pd.read_csv(file)
-
-        if "timestamp" in df.columns:
-            #df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-            df = df.set_index("timestamp")
-
         loader = CsvSource()
-        params = LoadParams(path=file.name)
+        params = LoadParams(path=file)
+        df = loader.load(params)
         st.session_state["df"] = df
 
 # Prometheus / Victoria
@@ -107,7 +101,11 @@ if st.session_state["df"] is not None:
 
     start_idx = None
     if mode == "С номера индекса":
-        start_idx = st.number_input("Номер точки (0..N-1)", min_value=0, max_value=len(df)-1, value=len(df)-5)
+        start_idx = st.number_input("Номер точки (0..N-1)", min_value=0, max_value=len(df) - 1, value=len(df) - 5)
+
+    series_list = df.columns.tolist()
+    selected_series = st.selectbox("Выберите временной ряд", series_list)
+    st.write("Вы выбрали:", selected_series)
 
     st.markdown("**Выберите модели:**")
     use_sarimax = st.checkbox("SARIMAX", value=True)
@@ -115,38 +113,25 @@ if st.session_state["df"] is not None:
     use_prophet = st.checkbox("Prophet")
     use_lstm = st.checkbox("LSTM")
 
-    if st.button("Выполнить прогноз"):
-        # Берём первую метрику для примера
+    if use_sarimax:
+        models.append("sarimax")
+    if use_arima:
+        models.append("arima")
+    if use_prophet:
+        models.append("prophet")
+    if use_lstm:
+        models.append("lstm")
 
-        ssmp.predict()
-
-        series = df.iloc[:, 0]
+    if selected_series and st.button("Выполнить прогноз"):
+        if not models:
+            st.warning("Выберите хотя бы одну модель!")
+        chosen_series = df[selected_series]
+        print(f"Current index {chosen_series.index.inferred_type}")
         if start_idx:
-            series = series.iloc[:start_idx]
-
-        predictor = SingleSeriesModelPredictor(ForecastParams(acf_length=None))
-#Переделать
-        models = []
-        if use_sarimax:
-            models.append(SARIMAXModel(series, SarimaxParams()))
-        if use_arima:
-            models.append(ARIMAModel(series, ARIMAParams()))
-        if use_prophet:
-            models.append(ProphetModel(series, ProphetParams()))
-        if use_lstm:
-            models.append(LSTMModel(series, LSTMParams(window=5, horizon=horizon)))
-
-        # подключаем модели
-        for m in models:
-            predictor.models[m.name] = m
+            chosen_series = chosen_series.iloc[:start_idx]
+        forecast_df = ssmp.predict(chosen_series, PredictParams(models_names=models))
 
         # запускаем прогноз
-        results = {}
-        for name, model in predictor.models.items():
-            fcst = model.forecast(PredictParams(horizon=horizon))
-            results[name] = fcst["yhat"]
-
-        forecast_df = pd.DataFrame(results)
         st.subheader("📈 Прогноз")
         st.dataframe(forecast_df)
 

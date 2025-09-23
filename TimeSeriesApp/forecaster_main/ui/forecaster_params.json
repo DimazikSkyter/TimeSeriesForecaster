@@ -1,0 +1,8 @@
+{
+  "max_points": 1000,
+  "periodogram_max_period": 100,
+  "candidate_periods": [7, 30, 52, 365],
+  "top_n": 5,
+  "model_creation_timeout": 10,
+  "window": 12
+}

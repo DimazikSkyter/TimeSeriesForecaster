@@ -1,6 +1,6 @@
 import asyncio
-from dataclasses import dataclass, asdict
-from typing import Optional, Dict
+from dataclasses import dataclass, asdict, field
+from typing import Optional, Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,14 +13,12 @@ from forecaster_main.predictor.models import models_factory, SeriesParams, Model
 
 @dataclass
 class ForecastParams:
-    max_points: int = 1000  # count of point in series
-    periodogram_max_period: int = 100  #
-
-    candidate_periods = (7, 30, 52, 365)
-    top_n = 5
-
+    max_points: int = 1000
+    periodogram_max_period: int = 100
+    candidate_periods: Tuple[int, ...] = field(default_factory=lambda: (7, 30, 52, 365))
+    top_n: int = 5
     model_creation_timeout: int = 10
-
+    window: int = 10
 
 class SingleSeriesModelPredictor:
     """
@@ -118,9 +116,10 @@ class SingleSeriesModelPredictor:
         self.models = asyncio.run(self.init_models(series_params, predict_params))
         index = self._prepare_index(series, predict_params.horizon)
         df = pd.DataFrame(index=index)
+        df["origin_series"] = series.reindex(index)
         for name, model in self.models.items():
             fcst = model.forecast(predict_params)
-            df[name] = fcst["yhat"].values
+            df[name] = fcst.reindex(index)["yhat"]
         return df
 
     def analyze_series(self, series: pd.Series):

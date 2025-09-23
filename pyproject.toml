@@ -27,6 +27,8 @@ packages = [{ include = "forecaster_main", from = "TimeSeriesApp" }]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"
+debugpy = "^1.8.17"
+pydevd-pycharm = "^253.20558.58"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

@@ -3,15 +3,10 @@ from typing import Protocol, Optional, Any
 
 import numpy as np
 import pandas as pd
-from altair import param
 from keras import Sequential
 from keras.src.layers import LSTM, Dense
 from prophet import Prophet
 from statsmodels.tsa.statespace.sarimax import SARIMAX
-from streamlit import dataframe
-
-from pacf_vs_acf import series
-from sarimax import model
 
 
 @dataclass
@@ -20,20 +15,24 @@ class PredictParams:
     freq: Optional[str] = None
     models_names: list[str] = field(default_factory=list)
 
+
 @dataclass
 class SarimaxParams:
     order: tuple[int, int, int] = (1, 1, 1)
     seasonal_order: tuple[int, int, int, int] = (1, 1, 1, 12)
     trend: str = None
 
+
 @dataclass
 class ARIMAParams:
-    order: tuple[int,int,int] = (1,1,1)
-    seasonal_order: tuple[int,int,int,int] | None = None  # например (P, D, Q, s)
+    order: tuple[int, int, int] = (1, 1, 1)
+    seasonal_order: tuple[int, int, int, int] | None = None  # например (P, D, Q, s)
+
 
 @dataclass
 class ProphetParams:
     pass
+
 
 @dataclass
 class LSTMParams:
@@ -42,6 +41,7 @@ class LSTMParams:
     units: int = 50
     epochs: int = 20
 
+
 @dataclass
 class SeriesParams:
     trend: any
@@ -49,6 +49,7 @@ class SeriesParams:
     scores: any
     final_resid: any
     final_resid_mae: any
+
 
 @dataclass
 class ModelParams:
@@ -71,7 +72,9 @@ class Model(Protocol):
         :return: avg for each row (models mean for each point)
         """
         return results.mean(axis=1)
-#todo сжать ARIMA и SARIMAX в общую модель
+
+
+# todo сжать ARIMA и SARIMAX в общую модель
 class SARIMAXModel(Model):
     def __init__(self, series_params: SeriesParams, model_params: SarimaxParams):
         self.series = series_params.final_resid
@@ -79,7 +82,7 @@ class SARIMAXModel(Model):
         self.seasonal_order = model_params.seasonal_order
 
         self.model_fit = SARIMAX(
-            series,
+            self.series,
             order=self.order,
             trend=model_params.trend,
             seasonal_order=self.seasonal_order,
@@ -100,13 +103,14 @@ class SARIMAXModel(Model):
         )
         return pd.DataFrame({"yhat": fcst}, index=fcst_index)
 
+
 class ARIMAModel(Model):
     def __init__(self, series_params: SeriesParams, model_params: ARIMAParams):
         self.series = series_params.final_resid
         self.params = model_params
         if model_params.seasonal_order:
             self.model_fit = SARIMAX(
-                series,
+                self.series,
                 order=model_params.order,
                 seasonal_order=model_params.seasonal_order,
                 enforce_stationarity=False,
@@ -114,7 +118,7 @@ class ARIMAModel(Model):
             ).fit(disp=False)
         else:
             from statsmodels.tsa.arima.model import ARIMA as SM_ARIMA
-            self.model_fit = SM_ARIMA(series, order=model_params.order).fit()
+            self.model_fit = SM_ARIMA(self.series, order=model_params.order).fit()
 
     @property
     def name(self) -> str:
@@ -127,11 +131,12 @@ class ARIMAModel(Model):
         fcst = self.model_fit.forecast(steps=prediction.horizon)
         return pd.DataFrame({"yhat": fcst})
 
+
 class ProphetModel(Model):
 
     def __init__(self, series_params: SeriesParams, model_params: ProphetParams):
         df = pd.DataFrame({
-            "ds": series_params.final_resid.index,
+            "ds": series_params.final_resid.index.tz_localize(None),
             "y": series_params.final_resid.values,
         })
         self.model = Prophet(**asdict(model_params))
@@ -146,6 +151,7 @@ class ProphetModel(Model):
         forecast = self.model.predict(future)
         return forecast[["ds", "yhat"]].tail(prediction.horizon).set_index("ds")
 
+
 class LSTMModel(Model):
 
     def __init__(self, series_params: SeriesParams, model_params: LSTMParams):
@@ -154,11 +160,11 @@ class LSTMModel(Model):
         self.series = series_params.final_resid
 
         # подготавливаем данные (X = окна, y = следующая точка)
-        values = series.values.reshape(-1, 1)
+        values = self.series.values.reshape(-1, 1)
         X, y = [], []
         for i in range(len(values) - self.window):
-            X.append(values[i:i+self.window])
-            y.append(values[i+self.window])
+            X.append(values[i:i + self.window])
+            y.append(values[i + self.window])
         X, y = np.array(X), np.array(y)
 
         # модель

@@ -10,8 +10,17 @@ from forecaster_main.infrastructure.io_data import CsvSource, ClickHouseSource, 
     SaveParams, PrometheusSource
 
 csv_path = Path(__file__).parent / "data.csv"
+week_max_5y_path = Path(__file__).parent / "week_max_5y.csv"
 excel_path = Path(__file__).parent / "data.xlsx"
 
+
+def test_csv_load_withtimestamp():
+    loader = CsvSource()
+    params = LoadParams(path=str(week_max_5y_path))
+    df_loaded = loader.load(params)
+
+    assert df_loaded is not None
+    assert "datetime64" in df_loaded.index.inferred_type
 
 def test_csv_load_and_save():
     loader = CsvSource()
