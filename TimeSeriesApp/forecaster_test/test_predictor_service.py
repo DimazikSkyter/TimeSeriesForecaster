@@ -1,6 +1,8 @@
 # tests/test_predictor_service.py
 import time
 import types
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,6 +13,10 @@ from forecaster_main.predictor.predictor_service import (
     PredictParams,
     SeriesParams,
 )
+from forecaster_main.infrastructure.io_data import CsvSource, LoadParams
+from forecaster_main.infrastructure.logging import LoggingParams
+
+week_max_5y_path = Path(__file__).parent / "week_max_5y.csv"
 
 # ---------- вспомогательные штуки ----------
 
@@ -43,7 +49,7 @@ def dummy_series_params(series: pd.Series) -> SeriesParams:
         trend=None,
         seasonals={},
         scores={},
-        final_resid=series,
+        source_series=series,
         final_resid_mae=float(np.mean(np.abs(series)))
     )
 
@@ -225,11 +231,18 @@ def test_predict_happy_path_with_mocks(monkeypatch):
     assert out["m1"].tolist() == [0.0, 1.0, 2.0, 3.0]
     assert out["m2"].tolist() == [0.0, 1.0, 2.0, 3.0]
 
-# ---------- analyze_series ----------
+def test_analyze_with_5y():
+    csv_loader = CsvSource()
+    df = csv_loader.load(LoadParams(path=str(week_max_5y_path)))
+    series = df[["value"]]
+    ssmp = SingleSeriesModelPredictor(ForecastParams(), LoggingParams())
+    sp: SeriesParams = ssmp.analyze_series(series)
+    print("Test for analyze for 5y is finished")
+
 
 def test_analyze_series_no_valid_periods(monkeypatch):
     # заставим periodogram вернуть пустоту, чтобы остались только фикс-кандидаты
-    p = SingleSeriesModelPredictor(ForecastParams())
+    p = SingleSeriesModelPredictor(ForecastParams(), LoggingParams())
     s = make_series_numeric(10)
     # сделаем такие кандидаты, чтобы все отсеялись (len<2*period)
     p.params.candidate_periods = (100, 200)
@@ -240,7 +253,7 @@ def test_analyze_series_no_valid_periods(monkeypatch):
     sp = p.analyze_series(s)
     assert sp.trend is None
     assert sp.seasonals == {}
-    assert sp.final_resid_mae == pytest.approx(float(np.mean(np.abs(sp.final_resid))))
+    assert sp.final_resid_mae == pytest.approx(float(np.mean(np.abs(sp.source_series))))
 
 def test_analyze_series_with_fake_stl(monkeypatch):
     p = SingleSeriesModelPredictor(ForecastParams())

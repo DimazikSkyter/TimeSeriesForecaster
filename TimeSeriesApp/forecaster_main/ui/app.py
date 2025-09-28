@@ -20,7 +20,7 @@ st.title("📈 Metric Forecaster Prototype")
 st.caption("Загрузи временные ряды из источника и визуализируй их.")
 
 # Инициализация session_state
-models = []
+models = ["trend"]
 if "df" not in st.session_state:
     st.session_state["df"] = None
 

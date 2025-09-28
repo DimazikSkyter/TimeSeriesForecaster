@@ -2,11 +2,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tensorflow.lite.python.util import trace_model_call
+from utilsforecast.feature_engineering import trend
 
 from forecaster_main.predictor.models import ARIMAModel, ProphetModel, LSTMModel, PredictParams, ARIMAParams, \
     ProphetParams, LSTMParams, SARIMAXModel
 from forecaster_test.daily_load_generator import generate_series,weekly_max
-from predictor.models import SarimaxParams
+from predictor.models import SarimaxParams, SeriesParams
 
 seria_size = 1000
 prediction_len = 120
@@ -51,7 +52,11 @@ def plot_results(original, forecast, true_future, title):
 
 def test_sarimax_model_on_5y_trend():
     series, true_future = generate_trend_load()
-    model = SARIMAXModel(series, SarimaxParams(order=(1,1,1), seasonal_order=(1,1,1,52), trend="t"))
+    model = SARIMAXModel(SeriesParams(trend=None,
+                                      seasonals=None,
+                                      scores=None,
+                                      source_series=series,
+                                      final_resid_mae=None), SarimaxParams(order=(1,1,1), seasonal_order=(1,1,1,52), trend="t"))
     forecast = model.forecast(PredictParams(horizon=prediction_len))
     assert not forecast.empty
     plot_results(series, forecast, true_future,"SARIMAX on 5y trend-like data")

@@ -1,12 +1,17 @@
+import time
 from dataclasses import dataclass, asdict, field
-from typing import Protocol, Optional, Any
+from typing import Protocol, Optional, Any, Set
 
 import numpy as np
 import pandas as pd
 from keras import Sequential
 from keras.src.layers import LSTM, Dense
 from prophet import Prophet
+from statsmodels.api import OLS
+from statsmodels.tools import add_constant
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+from forecaster_main.infrastructure.logging import LoggingParams
 
 
 @dataclass
@@ -43,12 +48,21 @@ class LSTMParams:
 
 
 @dataclass
-class SeriesParams:
-    trend: any
-    seasonals: any
-    scores: any
-    final_resid: any
-    final_resid_mae: any
+class TrendParams:
+    pass
+
+
+@dataclass
+class SeriesParams:  # обновите под ваш проект, если нужно
+    trend: pd.Series
+    r2: float  # Percent of noise variance in total variance
+    corr: float
+    periods: Set[int]
+    source_series: pd.Series = field(repr=False)
+    min_value: float
+    max_value: float
+    median_value: float
+    mean_value: float
 
 
 @dataclass
@@ -76,10 +90,16 @@ class Model(Protocol):
 
 # todo сжать ARIMA и SARIMAX в общую модель
 class SARIMAXModel(Model):
-    def __init__(self, series_params: SeriesParams, model_params: SarimaxParams):
-        self.series = series_params.final_resid
+    def __init__(self, series_params: SeriesParams,
+                 model_params: SarimaxParams,
+                 logging_params: LoggingParams):
+        self.series = series_params.source_series
         self.order = model_params.order
         self.seasonal_order = model_params.seasonal_order
+        self.logger = logging_params.configure(self.__class__.__name__)
+
+        self.logger.info(f"Try to fit model {self.name} with model params {model_params}")
+        start_time = time.perf_counter()
 
         self.model_fit = SARIMAX(
             self.series,
@@ -89,6 +109,9 @@ class SARIMAXModel(Model):
             enforce_stationarity=False,
             enforce_invertibility=False
         ).fit(disp=False)
+
+        elapsed = time.perf_counter() - start_time
+        self.logger.info(f"Fit model {self.name} successfully in {elapsed:.2f} seconds")
 
     @property
     def name(self) -> str:
@@ -105,9 +128,16 @@ class SARIMAXModel(Model):
 
 
 class ARIMAModel(Model):
-    def __init__(self, series_params: SeriesParams, model_params: ARIMAParams):
-        self.series = series_params.final_resid
+    def __init__(self, series_params: SeriesParams,
+                 model_params: ARIMAParams,
+                 logging_params: LoggingParams):
+        self.series = series_params.source_series
         self.params = model_params
+        self.logger = logging_params.configure(self.__class__.__name__)
+
+        self.logger.info(f"Try to fit model {self.name} with model params {model_params}")
+        start_time = time.perf_counter()
+
         if model_params.seasonal_order:
             self.model_fit = SARIMAX(
                 self.series,
@@ -119,6 +149,9 @@ class ARIMAModel(Model):
         else:
             from statsmodels.tsa.arima.model import ARIMA as SM_ARIMA
             self.model_fit = SM_ARIMA(self.series, order=model_params.order).fit()
+
+        elapsed = time.perf_counter() - start_time
+        self.logger.info(f"Fit model {self.name} successfully in {elapsed:.2f} seconds")
 
     @property
     def name(self) -> str:
@@ -134,13 +167,22 @@ class ARIMAModel(Model):
 
 class ProphetModel(Model):
 
-    def __init__(self, series_params: SeriesParams, model_params: ProphetParams):
+    def __init__(self, series_params: SeriesParams,
+                 model_params: ProphetParams,
+                 logging_params: LoggingParams):
+        self.logger = logging_params.configure(self.__class__.__name__)
+
+        self.logger.info(f"Try to fit model {self.name} with model params {model_params}")
+        start_time = time.perf_counter()
         df = pd.DataFrame({
-            "ds": series_params.final_resid.index.tz_localize(None),
-            "y": series_params.final_resid.values,
+            "ds": series_params.source_series.index.tz_localize(None),
+            "y": series_params.source_series.values,
         })
         self.model = Prophet(**asdict(model_params))
         self.model.fit(df)
+
+        elapsed = time.perf_counter() - start_time
+        self.logger.info(f"Fit model {self.name} successfully in {elapsed:.2f} seconds")
 
     @property
     def name(self) -> str:
@@ -157,7 +199,7 @@ class LSTMModel(Model):
     def __init__(self, series_params: SeriesParams, model_params: LSTMParams):
         self.window = model_params.window
         self.horizon = model_params.horizon
-        self.series = series_params.final_resid
+        self.series = series_params.source_series
 
         # подготавливаем данные (X = окна, y = следующая точка)
         values = self.series.values.reshape(-1, 1)
@@ -199,12 +241,42 @@ class LSTMModel(Model):
         return pd.DataFrame({"yhat": preds}, index=index)
 
 
+class TrendModel(Model):
+    def __init__(self, series_params: SeriesParams, model_params: TrendParams):
+        y = series_params.source_series.values
+        # используем числовой индекс (0, 1, 2, …) вместо дат
+        x = np.arange(len(y))
+        X = add_constant(x)  # добавляем константу для интерсепта
+        self.series = series_params.source_series
+        self.model = OLS(y, X).fit()
+        self.last_index = x[-1]
+        self.freq = series_params.source_series.index.freq or pd.infer_freq(series_params.source_series.index)
+        self.start_date = series_params.source_series.index[-1]
+
+    @property
+    def name(self):
+        return "TREND_LR"
+
+    def forecast(self, prediction: PredictParams) -> pd.DataFrame:
+        future_x = np.arange(self.last_index + 1, self.last_index + prediction.horizon + 1)
+        X_future = add_constant(future_x)
+        preds = self.model.predict(X_future)
+
+        index = pd.date_range(
+            start=self.series.index[-1] + (self.series.index[1] - self.series.index[0]),
+            periods=prediction.horizon,
+            freq=self.series.index.freq or pd.infer_freq(self.series.index)
+        )
+        return pd.DataFrame({"yhat": preds}, index=index)
+
+
 def models_factory(name: str, series_params, model_params: ModelParams) -> Model:
     registry = {
         "sarimax": (SARIMAXModel, SarimaxParams),
         "arima": (ARIMAModel, ARIMAParams),
         "prophet": (ProphetModel, ProphetParams),
         "lstm": (LSTMModel, LSTMParams),
+        "trend": (TrendModel, TrendParams),
     }
 
     try:

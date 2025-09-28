@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Any, Dict, Protocol, io
+from io import BytesIO
+from typing import Optional, Any, Dict, Protocol
 
 import clickhouse_connect
 import pandas as pd
 import requests
+
+from forecaster_main.infrastructure.logging import LoggingParams
 
 
 # TODO добавить фильтрацию колонок
@@ -23,7 +26,7 @@ class ClickhouseParams:
 @dataclass
 class LoadParams:
     # CSV / Excel
-    path: Optional[str | io.BytesIO] = None
+    path: Optional[str | BytesIO] = None
     sep: str = ","
     datetime_col: str = "timestamp"
 
@@ -58,11 +61,15 @@ class DataSource(Protocol):
 
 
 class CsvSource(DataSource):
+    def __init__(self, logging_params: LoggingParams = LoggingParams()):
+        self.logger = logging_params.configure(self.__class__.__name__)
+
     def load(self, params: LoadParams) -> pd.DataFrame:
+        self.logger.info(f"Loading file with params={params}")
         if not params.path:
             raise ValueError("CSV/Excel path must be provided")
 
-        if hasattr(params.path, "read"):  # file-like (Streamlit uploader)
+        if hasattr(params.path, "read"):
             df = pd.read_csv(params.path, sep=params.sep)
         elif isinstance(params.path, str):
             if params.path.lower().endswith((".xlsx", ".xls")):
@@ -123,10 +130,11 @@ class CsvSource(DataSource):
         # все числовые колонки → float
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
-
+        self.logger.debug(f"Loaded dataframe by CsvSource shape={df.shape}")
         return df
 
     def save(self, df: pd.DataFrame, params: SaveParams) -> None:
+        self.logger.info(f"Try to save data with params={params}")
         if not params.path:
             raise ValueError("CSV/Excel path must be provided")
         subtype = params.path.split(".")[-1].lower()
@@ -138,19 +146,28 @@ class CsvSource(DataSource):
         else:
             raise ValueError("Only csv, xlsx, xls supported")
 
+        self.logger.info(f"File successfully saved at path={params.path}")
+
 
 class PrometheusSource(DataSource):
+    def __init__(self, logging_params: LoggingParams = LoggingParams()):
+        self.logger = logging_params.configure(self.__class__.__name__)
+
     def load(self, params: LoadParams) -> pd.DataFrame:
+        self.logger.info(f"Loading file with params={params}")
         if not (params.query and params.uri and params.start and params.end):
             raise ValueError("uri, query, start, end required for Prometheus")
 
         url = f"{params.uri}/api/v1/query_range"
-        response = requests.get(url, params={
-            "query": params.query,
-            "start": int(params.start.timestamp()),
-            "end": int(params.end.timestamp()),
-            "step": params.step,
-        }, timeout=params.timeout_sec)
+        try:
+            response = requests.get(url, params={
+                "query": params.query,
+                "start": int(params.options["start"].timestamp()),
+                "end": int(params.options["end"].timestamp()),
+                "step": params.step,
+            }, timeout=params.timeout_sec)
+        except Exception as e:
+            self.logger.error(f"Failed to load data with url {url}", exc_info=e)
         response.raise_for_status()
         result = response.json()["data"]["result"]
 
@@ -170,6 +187,7 @@ class PrometheusSource(DataSource):
             frames.append(df)
 
         merged = pd.concat(frames, axis=1)
+        self.logger.info(f"Successfully load timeseries from source ")
         return merged
 
     def save(self, df: pd.DataFrame, params: SaveParams) -> None:
@@ -178,7 +196,9 @@ class PrometheusSource(DataSource):
 
 # todo autoclose?
 class ClickHouseSource(DataSource):
-    def __init__(self, params: ClickhouseParams):
+    def __init__(self, params: ClickhouseParams, logging_params: LoggingParams = LoggingParams()):
+        self.logger = logging_params.configure(self.__class__.__name__)
+        self.clickhouse_params = params
         self.client = clickhouse_connect.get_client(
             host=params.ch_host,
             port=params.ch_port,
@@ -190,7 +210,7 @@ class ClickHouseSource(DataSource):
     def load(self, params: LoadParams) -> pd.DataFrame:
         if not params.ch_table:
             raise ValueError("ClickHouse  table required")
-
+        self.logger.info(f"Try to load data from clickhouse {self.clickhouse_params} with params={params}")
         query = f"""
             SELECT timestamp, timeseries_name, timeseries_tags, time_series_value
             FROM {params.ch_table}
@@ -204,9 +224,11 @@ class ClickHouseSource(DataSource):
         df["col_name"] = df["timeseries_name"] + df["timeseries_tags"].fillna("")
         pivoted = df.pivot(index="timestamp", columns="col_name", values="time_series_value")
         pivoted.index = pd.to_datetime(pivoted.index)
+        self.logger.info(f"Data successfully loaded from clickhouse for {len(pivoted.index)} rows")
         return pivoted
 
     def save(self, df: pd.DataFrame, params: SaveParams) -> None:
+        self.logger.info(f"Trying to save data in clickhouse {self.clickhouse_params} with params={params}")
         if not params.ch_table:
             raise ValueError("ClickHouse table required")
 
@@ -216,3 +238,5 @@ class ClickHouseSource(DataSource):
                 records.append((ts, col, "", float(val)))
         self.client.insert(params.ch_table, records,
                            column_names=["timestamp", "timeseries_name", "timeseries_tags", "time_series_value"])
+
+        self.logger.info(f"Successfully saved data in clickhouse for {len(records)} rows")
