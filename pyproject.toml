@@ -29,6 +29,31 @@ packages = [{ include = "forecaster_main", from = "TimeSeriesApp" }]
 pytest = "^8.4.2"
 debugpy = "^1.8.17"
 pydevd-pycharm = "^253.20558.58"
+mypy = "^1.11.1"
+black = "^24.10.0"
+isort = "^5.13.2"
+types-requests = "^2.32.0"
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+extend-exclude = "TimeSeriesApp/forecaster_test"
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["forecaster_main"]
+skip = [
+    "TimeSeriesApp/forecaster_test",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+exclude = "TimeSeriesApp/forecaster_test"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
