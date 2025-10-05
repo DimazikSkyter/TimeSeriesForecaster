@@ -114,7 +114,7 @@ def _visualize_forecast_only(series: pd.Series, predictor, title: str, truth_fun
     plt.close(fig)
 # ---------- фикстуры ----------
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def predictor():
     params = ForecastParams(
         max_points=1000,
@@ -158,26 +158,33 @@ def series_two_periods():
     rng = np.random.default_rng(123)
     n = 416
     t = np.arange(n)
+
     def formula(tt):
         return (400.0
                 + 60.0 * np.sin(2 * np.pi * tt / 12)
                 + 140.0 * np.sin(2 * np.pi * tt / 52)
                 + 2.5 * tt
                 + rng.normal(scale=25.0, size=len(tt)))
+
     y = formula(t)
-    idx = pd.RangeIndex(start=0, stop=n)
+
+    # индекс — дни начиная с 2000-01-01
+    idx = pd.date_range(start="2000-01-01", periods=n, freq="D")
     series = pd.Series(y, index=idx)
 
     def gen_future_truth(last_idx, horizon):
-        tt = np.arange(last_idx + 1, last_idx + horizon + 1)
+        # last_idx теперь datetime, а нам нужны шаги времени
+        start_offset = (idx[-1] - idx[0]).days + 1
+        tt = np.arange(start_offset, start_offset + horizon)
         yy = (400.0
               + 60.0 * np.sin(2 * np.pi * tt / 12)
               + 140.0 * np.sin(2 * np.pi * tt / 52)
               + 2.5 * tt)
-        return pd.Series(yy, index=tt)
+        future_index = pd.date_range(start=idx[-1] + pd.Timedelta(days=1),
+                                     periods=horizon, freq="D")
+        return pd.Series(yy, index=future_index)
 
     return series, gen_future_truth
-
 
 @pytest.fixture(scope="module")
 def series_arima():
@@ -192,9 +199,29 @@ def series_arima():
     series = pd.Series(y, index=idx)
 
     def gen_future_truth(last_idx, horizon):
-        tt = np.arange(last_idx + 1, last_idx + horizon + 1)
-        yy = np.linspace(series.iloc[-1], series.iloc[-1] + 5 * horizon, horizon)
-        return pd.Series(yy, index=tt)
+        # --- продолжаем тот же ARIMA(2,1,2) процесс ---
+        ar = np.array([1.0, -0.5, 0.25])
+        ma = np.array([1.0, 0.4, 0.3])
+        arma = ArmaProcess(ar, ma)
+
+        # генерируем приращения (d=1)
+        eps = np.random.default_rng(999).standard_normal(horizon)
+        # важно: distrvs должен принимать size!
+        distrvs = lambda size=None: eps[: np.prod(size) if size is not None else horizon]
+
+        y_future = arma.generate_sample(
+            nsample=horizon,
+            scale=5.0,
+            distrvs=distrvs
+        )
+
+        # интегрируем относительно последнего значения
+        last_val = series.iloc[-1]
+        y_future = np.cumsum(y_future) + last_val
+        y_future = np.clip(y_future, 0.0, 1200.0)
+
+        idx_future = pd.RangeIndex(start=last_idx + 1, stop=last_idx + 1 + horizon)
+        return pd.Series(y_future, index=idx_future)
 
     return series, gen_future_truth
 
@@ -213,7 +240,7 @@ def series_asymptotic():
         tt = np.arange(last_idx + 1, last_idx + horizon + 1)
         trend_future = 1600.0 - 1200.0 * np.exp(-tt / 100.0)
         seasonal_future = 80.0 * np.sin(2 * np.pi * tt / 16.0)
-        yy = 400.0 + (trend_future - trend_future[0]) + seasonal_future
+        yy = trend_future + seasonal_future
         return pd.Series(yy, index=tt)
 
     return series, gen_future_truth
@@ -253,4 +280,5 @@ def test_asymptotic(predictor, series_asymptotic):
     series, truth_func = series_asymptotic
     params = predictor.analyze_series(series)
     _visualize_top3(series, params, "asymptotic_16")
-    _visualize_forecast_only(series, predictor, "asymptotic_16", truth_func)
+    _visualize_forecast_only(series, predictor, "asymptotic_16", truth_func,
+                             ["arima", "prophet", "lstm", "trend"])

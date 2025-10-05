@@ -1,8 +1,14 @@
 {
-  "max_points": 1000,
+  "max_points": 2000,
   "periodogram_max_period": 100,
   "candidate_periods": [7, 30, 52, 365],
   "top_n": 5,
-  "model_creation_timeout": 10,
-  "window": 12
+  "model_creation_timeout": 120,
+  "window": 12,
+  "minimum_series_length": 10,
+  "min_cycle_length" : 5,
+  "min_power" : 100,
+  "min_season_strength" : 0.6,
+  "min_r2_stl": 0.8,
+  "max_cycles_in_ts": 2
 }

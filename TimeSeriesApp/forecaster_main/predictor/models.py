@@ -100,8 +100,12 @@ class SARIMAXModel(Model):
                  logging_params: LoggingParams):
         self.series = series_params.source_series
         self.order = model_params.order
-        self.seasonal_order = model_params.seasonal_order
         self.logger = logging_params.configure(self.__class__.__name__)
+        if series_params.periods:
+            best_period = max(series_params.periods)
+            self.seasonal_order = (1, 1, 1, best_period)
+        else:
+            self.seasonal_order = model_params.seasonal_order
 
         self.logger.info(f"Try to fit model {self.name} with model params {model_params}")
         start_time = time.perf_counter()
@@ -305,14 +309,9 @@ class LSTMModel(Model):
         else:
             trend_future = 0.0
 
-        idx_future = pd.RangeIndex(
-            start=self.series.index[-1] + 1,
-            stop=self.series.index[-1] + 1 + prediction.horizon
-        )
-
         yhat = preds_resid_arr + trend_future
         self.logger.info("yhat is %s", yhat)
-        return pd.DataFrame({"yhat": yhat}, index=idx_future)
+        return pd.DataFrame({"yhat": yhat}, index=get_index(self.series, prediction.horizon))
 
 class TrendModel(Model):
     def __init__(self, series_params: SeriesParams, model_params: TrendParams,

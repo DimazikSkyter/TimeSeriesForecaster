@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from forecaster_main.infrastructure.io_data import (
 )
 from forecaster_main.predictor.models import PredictParams
 from forecaster_main.predictor.predictor_service import SingleSeriesModelPredictor, ForecastParams
+from forecaster_main.infrastructure.logging import LoggingParams
 
 FORECASTER_FILE_PATH: str = os.getenv('FORECASTER_FILE_PATH',
                                       str(Path(__file__).parent / "forecaster_params.json"))
@@ -28,7 +30,9 @@ if "df" not in st.session_state:
 with open(FORECASTER_FILE_PATH, "r", encoding="utf-8") as f:
     json_obj = json.load(f)
 forecaster_params: ForecastParams = ForecastParams(**json_obj)
-ssmp: SingleSeriesModelPredictor = SingleSeriesModelPredictor(forecaster_params)
+logging_level = os.getenv('LOGGING_LEVEL', 'INFO')
+level = logging.getLevelName(logging_level.upper())
+ssmp: SingleSeriesModelPredictor = SingleSeriesModelPredictor(forecaster_params, LoggingParams(level=level))
 
 # --- Источники ---
 source_type = st.selectbox(
@@ -129,7 +133,11 @@ if st.session_state["df"] is not None:
         print(f"Current index {chosen_series.index.inferred_type}")
         if start_idx:
             chosen_series = chosen_series.iloc[:start_idx]
-        forecast_df = ssmp.predict(chosen_series, PredictParams(models_names=models))
+
+        if horizon > len(chosen_series) // 2:
+            st.warning("Horizon больше половины длины ряда — прогноз может быть нестабильным.")
+
+        forecast_df = ssmp.predict(chosen_series, PredictParams(models_names=models, horizon=horizon))
 
         # запускаем прогноз
         st.subheader("📈 Прогноз")
