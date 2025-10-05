@@ -8,15 +8,22 @@ import plotly.express as px
 import streamlit as st
 
 from forecaster_main.infrastructure.io_data import (
-    LoadParams, CsvSource, PrometheusSource,
-    ClickHouseSource, ClickhouseParams
+    ClickhouseParams,
+    ClickHouseSource,
+    CsvSource,
+    LoadParams,
+    PrometheusSource,
 )
-from forecaster_main.predictor.models import PredictParams
-from forecaster_main.predictor.predictor_service import SingleSeriesModelPredictor, ForecastParams
 from forecaster_main.infrastructure.logging import LoggingParams
+from forecaster_main.predictor.models import PredictParams
+from forecaster_main.predictor.predictor_service import (
+    ForecastParams,
+    SingleSeriesModelPredictor,
+)
 
-FORECASTER_FILE_PATH: str = os.getenv('FORECASTER_FILE_PATH',
-                                      str(Path(__file__).parent / "forecaster_params.json"))
+FORECASTER_FILE_PATH: str = os.getenv(
+    "FORECASTER_FILE_PATH", str(Path(__file__).parent / "forecaster_params.json")
+)
 st.set_page_config(page_title="Metric Forecaster", layout="wide")
 st.title("📈 Metric Forecaster Prototype")
 st.caption("Загрузи временные ряды из источника и визуализируй их.")
@@ -30,23 +37,24 @@ if "df" not in st.session_state:
 with open(FORECASTER_FILE_PATH, "r", encoding="utf-8") as f:
     json_obj = json.load(f)
 forecaster_params: ForecastParams = ForecastParams(**json_obj)
-logging_level = os.getenv('LOGGING_LEVEL', 'INFO')
+logging_level = os.getenv("LOGGING_LEVEL", "INFO")
 level = logging.getLevelName(logging_level.upper())
-ssmp: SingleSeriesModelPredictor = SingleSeriesModelPredictor(forecaster_params, LoggingParams(level=level))
+ssmp: SingleSeriesModelPredictor = SingleSeriesModelPredictor(
+    forecaster_params, LoggingParams(level=level)
+)
 
 # --- Источники ---
 source_type = st.selectbox(
-    "Источник данных",
-    ["CSV/Excel", "Prometheus/Victoria", "ClickHouse"]
+    "Источник данных", ["CSV/Excel", "Prometheus/Victoria", "ClickHouse"]
 )
 
 # CSV / Excel
 if source_type == "CSV/Excel":
     file = st.file_uploader("Загрузите CSV или Excel", type=["csv", "xlsx"])
     if file is not None:
-        loader = CsvSource()
+        csv_loader = CsvSource()
         params = LoadParams(path=file)
-        df = loader.load(params)
+        df = csv_loader.load(params)
         st.session_state["df"] = df
 
 # Prometheus / Victoria
@@ -56,14 +64,14 @@ elif source_type == "Prometheus/Victoria":
     start = st.date_input("Start date")
     end = st.date_input("End date")
     if st.button("Загрузить"):
-        loader = PrometheusSource()
+        prometheus_loader = PrometheusSource()
         params = LoadParams(
             uri=uri,
             query=query,
             start=pd.Timestamp(start),
             end=pd.Timestamp(end),
         )
-        df = loader.load(params)
+        df = prometheus_loader.load(params)
         st.session_state["df"] = df
 
 # ClickHouse
@@ -83,8 +91,8 @@ elif source_type == "ClickHouse":
             ch_password=password,
             ch_database=database,
         )
-        loader = ClickHouseSource(ch_params)
-        df = loader.load(params)
+        clickhouse_loader = ClickHouseSource(ch_params)
+        df = clickhouse_loader.load(params)
         st.session_state["df"] = df
 
 # --- Отображение данных ---
@@ -105,7 +113,12 @@ if st.session_state["df"] is not None:
 
     start_idx = None
     if mode == "С номера индекса":
-        start_idx = st.number_input("Номер точки (0..N-1)", min_value=0, max_value=len(df) - 1, value=len(df) - 5)
+        start_idx = st.number_input(
+            "Номер точки (0..N-1)",
+            min_value=0,
+            max_value=len(df) - 1,
+            value=len(df) - 5,
+        )
 
     series_list = df.columns.tolist()
     selected_series = st.selectbox("Выберите временной ряд", series_list)
@@ -135,9 +148,13 @@ if st.session_state["df"] is not None:
             chosen_series = chosen_series.iloc[:start_idx]
 
         if horizon > len(chosen_series) // 2:
-            st.warning("Horizon больше половины длины ряда — прогноз может быть нестабильным.")
+            st.warning(
+                "Horizon больше половины длины ряда — прогноз может быть нестабильным."
+            )
 
-        forecast_df = ssmp.predict(chosen_series, PredictParams(models_names=models, horizon=horizon))
+        forecast_df = ssmp.predict(
+            chosen_series, PredictParams(models_names=models, horizon=horizon)
+        )
 
         # запускаем прогноз
         st.subheader("📈 Прогноз")

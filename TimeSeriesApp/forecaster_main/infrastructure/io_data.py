@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from io import BytesIO
-from typing import Optional, Any, Dict, Protocol
+from typing import Any, Protocol
 
 import clickhouse_connect
 import pandas as pd
-import requests
+import requests  # type: ignore[import-untyped]
+from requests import RequestException
 
 from forecaster_main.infrastructure.logging import LoggingParams
 
@@ -16,7 +18,7 @@ from forecaster_main.infrastructure.logging import LoggingParams
 # TODO 2 вынести в коммон
 @dataclass
 class ClickhouseParams:
-    ch_host: Optional[str] = None
+    ch_host: str | None = None
     ch_port: int = 8123
     ch_user: str = "default"
     ch_password: str = ""
@@ -26,32 +28,34 @@ class ClickhouseParams:
 @dataclass
 class LoadParams:
     # CSV / Excel
-    path: Optional[str | BytesIO] = None
+    path: str | BytesIO | None = None
     sep: str = ","
     datetime_col: str = "timestamp"
 
     # Prometheus / Victoria
-    query: Optional[str] = None
-    uri: Optional[str] = None
+    query: str | None = None
+    uri: str | None = None
     step: str = "1m"
     timeout_sec: int = 15
+    start: datetime | pd.Timestamp | None = None
+    end: datetime | pd.Timestamp | None = None
 
     # ClickHouse
-    ch_table: str = None
+    ch_table: str | None = None
 
-    options: Dict[str, Any] = field(default_factory=dict)
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class SaveParams:
     # CSV / Excel
-    path: Optional[str] = None
+    path: str | None = None
     sep: str = ","
 
     # ClickHouse
-    ch_table: str = None
+    ch_table: str | None = None
 
-    options: Dict[str, Any] = field(default_factory=dict)
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 class DataSource(Protocol):
@@ -61,8 +65,9 @@ class DataSource(Protocol):
 
 
 class CsvSource(DataSource):
-    def __init__(self, logging_params: LoggingParams = LoggingParams()):
-        self.logger = logging_params.configure(self.__class__.__name__)
+    def __init__(self, logging_params: LoggingParams | None = None):
+        self._logging_params = logging_params or LoggingParams()
+        self.logger = self._logging_params.configure(self.__class__.__name__)
 
     def load(self, params: LoadParams) -> pd.DataFrame:
         self.logger.info(f"Loading file with params={params}")
@@ -92,11 +97,20 @@ class CsvSource(DataSource):
                 if pattern_numeric.match(raw_ts.iloc[0]):
                     raw_ts = pd.to_numeric(raw_ts, errors="coerce")
                 elif params.options.get("timestamp_format"):
-                    ts = pd.to_datetime(raw_ts, format=params.options["timestamp_format"], errors="coerce", utc=True)
+                    ts = pd.to_datetime(
+                        raw_ts,
+                        format=params.options["timestamp_format"],
+                        errors="coerce",
+                        utc=True,
+                    )
                 elif pattern_date.match(raw_ts.iloc[0]):
-                    ts = pd.to_datetime(raw_ts, format="%Y-%m-%d", errors="coerce", utc=True)
+                    ts = pd.to_datetime(
+                        raw_ts, format="%Y-%m-%d", errors="coerce", utc=True
+                    )
                 elif pattern_datetime.match(raw_ts.iloc[0]):
-                    ts = pd.to_datetime(raw_ts, format="%Y-%m-%d %H:%M:%S", errors="coerce", utc=True)
+                    ts = pd.to_datetime(
+                        raw_ts, format="%Y-%m-%d %H:%M:%S", errors="coerce", utc=True
+                    )
 
             if pd.api.types.is_numeric_dtype(raw_ts):
                 # определяем unit по порядку величины
@@ -150,8 +164,9 @@ class CsvSource(DataSource):
 
 
 class PrometheusSource(DataSource):
-    def __init__(self, logging_params: LoggingParams = LoggingParams()):
-        self.logger = logging_params.configure(self.__class__.__name__)
+    def __init__(self, logging_params: LoggingParams | None = None):
+        self._logging_params = logging_params or LoggingParams()
+        self.logger = self._logging_params.configure(self.__class__.__name__)
 
     def load(self, params: LoadParams) -> pd.DataFrame:
         self.logger.info(f"Loading file with params={params}")
@@ -160,21 +175,34 @@ class PrometheusSource(DataSource):
 
         url = f"{params.uri}/api/v1/query_range"
         try:
-            response = requests.get(url, params={
-                "query": params.query,
-                "start": int(params.options["start"].timestamp()),
-                "end": int(params.options["end"].timestamp()),
-                "step": params.step,
-            }, timeout=params.timeout_sec)
-        except Exception as e:
-            self.logger.error(f"Failed to load data with url {url}", exc_info=e)
-        response.raise_for_status()
-        result = response.json()["data"]["result"]
+            response = requests.get(
+                url,
+                params={
+                    "query": params.query,
+                    "start": int(pd.Timestamp(params.start).timestamp()),
+                    "end": int(pd.Timestamp(params.end).timestamp()),
+                    "step": params.step,
+                },
+                timeout=params.timeout_sec,
+            )
+            response.raise_for_status()
+        except RequestException as exc:
+            self.logger.error("Failed to load data with url %s", url, exc_info=exc)
+            raise
 
-        frames = []
+        payload = response.json()
+        result = payload.get("data", {}).get("result", [])
+
+        frames: list[pd.DataFrame] = []
         for series in result:
             metric_name = series.get("metric", {}).get("__name__", "value")
-            tags = ",".join([f"{k}={v}" for k, v in series.get("metric", {}).items() if k != "__name__"])
+            tags = ",".join(
+                [
+                    f"{k}={v}"
+                    for k, v in series.get("metric", {}).items()
+                    if k != "__name__"
+                ]
+            )
             col_name = metric_name if not tags else f"{metric_name}{{{tags}}}"
 
             values = series["values"]  # [[ts, value], ...]
@@ -186,6 +214,9 @@ class PrometheusSource(DataSource):
             df = df.set_index("timestamp")
             frames.append(df)
 
+        if not frames:
+            return pd.DataFrame()
+
         merged = pd.concat(frames, axis=1)
         self.logger.info(f"Successfully load timeseries from source ")
         return merged
@@ -196,47 +227,76 @@ class PrometheusSource(DataSource):
 
 # todo autoclose?
 class ClickHouseSource(DataSource):
-    def __init__(self, params: ClickhouseParams, logging_params: LoggingParams = LoggingParams()):
-        self.logger = logging_params.configure(self.__class__.__name__)
+    def __init__(
+        self, params: ClickhouseParams, logging_params: LoggingParams | None = None
+    ):
+        self._logging_params = logging_params or LoggingParams()
+        self.logger = self._logging_params.configure(self.__class__.__name__)
         self.clickhouse_params = params
-        self.client = clickhouse_connect.get_client(
+        self.client: Any = clickhouse_connect.get_client(
             host=params.ch_host,
             port=params.ch_port,
             username=params.ch_user,
             password=params.ch_password,
-            database=params.ch_database
+            database=params.ch_database,
         )
 
     def load(self, params: LoadParams) -> pd.DataFrame:
         if not params.ch_table:
             raise ValueError("ClickHouse  table required")
-        self.logger.info(f"Try to load data from clickhouse {self.clickhouse_params} with params={params}")
+        self.logger.info(
+            f"Try to load data from clickhouse {self.clickhouse_params} with params={params}"
+        )
         query = f"""
             SELECT timestamp, timeseries_name, timeseries_tags, time_series_value
             FROM {params.ch_table}
         """
         if params.start and params.end:
-            query += f" WHERE timestamp BETWEEN '{params.start}' AND '{params.end}'"
+            start_ts = pd.Timestamp(params.start).isoformat()
+            end_ts = pd.Timestamp(params.end).isoformat()
+            query += f" WHERE timestamp BETWEEN '{start_ts}' AND '{end_ts}'"
 
         df = self.client.query_df(query)
 
         # комбинируем name+tags в имя колонки
         df["col_name"] = df["timeseries_name"] + df["timeseries_tags"].fillna("")
-        pivoted = df.pivot(index="timestamp", columns="col_name", values="time_series_value")
+        pivoted = df.pivot(
+            index="timestamp", columns="col_name", values="time_series_value"
+        )
         pivoted.index = pd.to_datetime(pivoted.index)
-        self.logger.info(f"Data successfully loaded from clickhouse for {len(pivoted.index)} rows")
+        self.logger.info(
+            f"Data successfully loaded from clickhouse for {len(pivoted.index)} rows"
+        )
         return pivoted
 
     def save(self, df: pd.DataFrame, params: SaveParams) -> None:
-        self.logger.info(f"Trying to save data in clickhouse {self.clickhouse_params} with params={params}")
+        self.logger.info(
+            f"Trying to save data in clickhouse {self.clickhouse_params} with params={params}"
+        )
         if not params.ch_table:
             raise ValueError("ClickHouse table required")
 
-        records = []
+        records: list[tuple[pd.Timestamp, str, str, float]] = []
         for col in df.columns:
             for ts, val in df[col].dropna().items():
-                records.append((ts, col, "", float(val)))
-        self.client.insert(params.ch_table, records,
-                           column_names=["timestamp", "timeseries_name", "timeseries_tags", "time_series_value"])
+                timestamp = pd.Timestamp(ts)
+                records.append((timestamp, col, "", float(val)))
 
-        self.logger.info(f"Successfully saved data in clickhouse for {len(records)} rows")
+        if not records:
+            self.logger.info("No records to save in clickhouse")
+            return
+
+        self.client.insert(
+            params.ch_table,
+            records,
+            column_names=[
+                "timestamp",
+                "timeseries_name",
+                "timeseries_tags",
+                "time_series_value",
+            ],
+        )
+
+        self.logger.info(
+            f"Successfully saved data in clickhouse for {len(records)} rows"
+        )
